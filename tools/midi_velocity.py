@@ -7,25 +7,39 @@ import numpy as np
 NOTE_WINDOW = 0.1  # seconds measured from each melody note's onset
 
 
+def _points(events):
+    pts = dict(sorted((e["subbeat"] / 4, e["values"]["timestamp"])
+                      for e in events if "timestamp" in e.get("values", {})))
+    if len(pts) < 2:
+        raise ValueError("events.json has fewer than 2 distinct timestamps")
+    return np.array(list(pts), float), np.array(list(pts.values()), float)
+
+
+def _linear(xs, ys):
+    """Piecewise-linear map xs -> ys, extended past the ends with the first/last segment slope."""
+    def f(x):
+        if x < xs[0]:
+            return float(ys[0] + (x - xs[0]) * (ys[1] - ys[0]) / (xs[1] - xs[0]))
+        if x > xs[-1]:
+            return float(ys[-1] + (x - xs[-1]) * (ys[-1] - ys[-2]) / (xs[-1] - xs[-2]))
+        return float(np.interp(x, xs, ys))
+    return f
+
+
 def quarter_clock(events):
     """SheetSage2 events.json events -> function mapping score quarters to audio seconds.
 
     subbeat is a 16th-note index from score quarter 0; timed events carry values["timestamp"].
     Outside the timed range, extend linearly with the first/last beat interval.
     """
-    pts = dict(sorted((e["subbeat"] / 4, e["values"]["timestamp"])
-                      for e in events if "timestamp" in e.get("values", {})))
-    if len(pts) < 2:
-        raise ValueError("events.json has fewer than 2 distinct timestamps")
-    q, t = np.array(list(pts), float), np.array(list(pts.values()), float)
+    q, t = _points(events)
+    return _linear(q, t)
 
-    def clock(quarter):
-        if quarter < q[0]:
-            return t[0] + (quarter - q[0]) * (t[1] - t[0]) / (q[1] - q[0])
-        if quarter > q[-1]:
-            return t[-1] + (quarter - q[-1]) * (t[-1] - t[-2]) / (q[-1] - q[-2])
-        return float(np.interp(quarter, q, t))
-    return clock
+
+def seconds_to_quarters(events):
+    """Inverse of quarter_clock: audio seconds -> score quarters."""
+    q, t = _points(events)
+    return _linear(t, q)
 
 
 def load_mono(path: Path, sr: int = 22050) -> np.ndarray:
