@@ -20,3 +20,11 @@ r = m.transcribe(str(audio), output_dir=str(song / "sheetsage2"), dtype="bf16" i
 if r.get("abc_error"):
     print(f"abc_error: {r['abc_error']}", flush=True)
 print("MIDI:", ", ".join(sorted(r.get("midis", {}))), flush=True)
+
+sys.path.insert(0, str(ROOT / "tools"))
+from abc_midi import render  # noqa: E402
+
+try:
+    print("ABC MIDI:", ", ".join(p.name for p in render(song)), flush=True)
+except Exception as e:  # score.abc can be missing or malformed (see abc_error)
+    print(f"ABC MIDI skipped: {e}", flush=True)
