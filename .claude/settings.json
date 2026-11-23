@@ -1,0 +1,19 @@
+{
+  "hooks": {
+    "PreToolUse": [
+      {
+        "matcher": "Bash|PowerShell",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "powershell.exe",
+            "args": ["-NoProfile", "-ExecutionPolicy", "Bypass", "-File", ".claude/hooks/guard-fork.ps1"],
+            "onFailure": "block",
+            "timeout": 15,
+            "statusMessage": "Checking push/PR target"
+          }
+        ]
+      }
+    ]
+  }
+}
