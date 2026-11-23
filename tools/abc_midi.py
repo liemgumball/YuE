@@ -30,12 +30,15 @@ QUALITIES = {  # longest suffix first when matching
 
 
 def chord_pitches(symbol):
-    """'Bbmaj7' -> MIDI pitches: bass root in octave 2-3, chord tones from C4 up. None if unknown."""
-    m = re.fullmatch(r"([A-G])([#b]?)(\S*?)(?:\s.*)?", symbol.strip())
+    """'Bbmaj7' / 'F/A' -> MIDI pitches: bass (root, or the note after '/') in octave 2-3,
+    chord tones from C4 up. None if unknown."""
+    m = re.fullmatch(r"([A-G])([#b]?)([^\s/]*?)(?:/([A-G])([#b]?))?(?:\s.*)?", symbol.strip())
     if not m or m.group(3) not in QUALITIES:
         return None
-    root = (ROOTS[m.group(1)] + {"#": 1, "b": -1, "": 0}[m.group(2)]) % 12
-    return [36 + root] + [60 + (root + i) % 12 for i in QUALITIES[m.group(3)]]
+    acc = {"#": 1, "b": -1, "": 0}
+    root = (ROOTS[m.group(1)] + acc[m.group(2)]) % 12
+    bass = (ROOTS[m.group(4)] + acc[m.group(5)]) % 12 if m.group(4) else root
+    return [36 + bass] + [60 + (root + i) % 12 for i in QUALITIES[m.group(3)]]
 
 
 def _track(name, channel, notes, velocity):

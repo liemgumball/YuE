@@ -41,6 +41,12 @@ class AbcMidiTest(unittest.TestCase):
         self.assertEqual(self.a.chord_pitches("Bbmaj7"), [46, 70, 62, 65, 69])
         self.assertEqual(self.a.chord_pitches("A7sus4"), [45, 69, 62, 64, 67])
         self.assertIsNone(self.a.chord_pitches("Xyz"))
+        # slash chords: the note after "/" replaces the bass root
+        self.assertEqual(self.a.chord_pitches("Dm/F"), [41, 62, 65, 69])
+        self.assertEqual(self.a.chord_pitches("Dm7/F"), [41, 62, 65, 69, 60])
+        self.assertEqual(self.a.chord_pitches("F/A"), [45, 65, 69, 60])
+        self.assertEqual(self.a.chord_pitches("C/Bb"), [46, 60, 64, 67])
+        self.assertIsNone(self.a.chord_pitches("C/H"))
 
     def _notes(self, path, with_velocity=False, track=None):
         m = mido.MidiFile(path)
