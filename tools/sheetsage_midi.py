@@ -19,12 +19,26 @@ print(f"Transcribing {audio}", flush=True)
 r = m.transcribe(str(audio), output_dir=str(song / "sheetsage2"), dtype="bf16" if device == "cuda" else "fp32")
 if r.get("abc_error"):
     print(f"abc_error: {r['abc_error']}", flush=True)
-print("MIDI:", ", ".join(sorted(r.get("midis", {}))), flush=True)
+# Only abc_*.mid and the stem MIDI ship; SheetSage2's own MIDI files are dropped.
+dropped = [p for p in (song / "sheetsage2").glob("*.mid") if not p.name.startswith("abc_")]
+for p in dropped:
+    p.unlink()
+print("Removed SheetSage MIDI:", ", ".join(sorted(p.name for p in dropped)), flush=True)
 
 sys.path.insert(0, str(ROOT / "tools"))
-from abc_midi import render  # noqa: E402
+import abc_midi  # noqa: E402
 
 try:
-    print("ABC MIDI:", ", ".join(p.name for p in render(song)), flush=True)
+    print("ABC MIDI:", ", ".join(p.name for p in abc_midi.render(song)), flush=True)
 except Exception as e:  # score.abc can be missing or malformed (see abc_error)
     print(f"ABC MIDI skipped: {e}", flush=True)
+
+del m
+torch.cuda.empty_cache()
+try:
+    import stem_midi
+    import stem_models
+    print("Stem MIDI:", ", ".join(p.name for p in stem_midi.render(song, stem_models.separate, stem_models.transcribe)),
+          flush=True)
+except Exception as e:  # stems are optional; ABC MIDI above stands on its own
+    print(f"Stem MIDI skipped: {e}", flush=True)

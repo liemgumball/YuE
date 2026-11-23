@@ -210,7 +210,7 @@ async function loadSongs(){loadFolders();const s=await(await fetch('/api/songs')
  <audio controls preload="none" src="/files/${encodeURI(x.audio)}"></audio>
  <div class="midi">${x.midis.length?`🎼 Đã có ${x.midis.length} file MIDI <button type="button" class="sm" onclick="openDir('${esc(x.name)}/sheetsage2')">📂 Mở thư mục MIDI</button>`
   :midiRunning.has(x.name)?'<span class="meta">⏳ Đang tạo MIDI… (~1 phút)</span>'
-  :`<button type="button" class="sm" onclick="makeMidi('${esc(x.name)}')">🎼 Tạo MIDI</button> <span class="help">Chuyển audio thành file MIDI (giai điệu, hợp âm, toàn bộ) bằng SheetSage2.</span>`}</div>
+  :`<button type="button" class="sm" onclick="makeMidi('${esc(x.name)}')">🎼 Tạo MIDI</button> <span class="help">Chuyển audio thành MIDI (giai điệu, hợp âm, bass, nhạc cụ khác) và tách stem audio (trống, bass, khác, vocal).</span>`}</div>
  <details><summary class="meta">lời bài hát</summary><pre>${esc(x.lyrics)}</pre></details></div>`).join(''):'<p class="meta">Chưa có bài hát nào.</p>'}
 let midiRunning=new Set();
 async function openDir(p){const r=await(await fetch('/api/open',{method:'POST',body:JSON.stringify({path:p})})).json();if(r.error)alert(r.error)}
