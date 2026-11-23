@@ -57,9 +57,29 @@ def songs():
             "audio": str(audio.relative_to(OUTPUTS)).replace("\\", "/"),
             "time": time.strftime("%Y-%m-%d %H:%M", time.localtime(audio.stat().st_mtime)),
             "style": req.get("style", ""), "lyrics": req.get("lyrics", ""), "seed": req.get("seed"),
+            "tempo": tempo(d),
             "midis": sorted(str(f.relative_to(OUTPUTS)).replace("\\", "/") for f in (d / "sheetsage2").glob("*.mid")),
         })
     return out
+
+
+def tempo(d):
+    """Tempo from score.abc (Q: line) and, if available, measured from sheetsage2/beat.lab."""
+    score, measured = None, None
+    try:
+        for line in (d / "score.abc").read_text(encoding="utf-8").splitlines():
+            if line.startswith("Q:"):
+                score = int(float(line.split("=")[-1].strip()))
+                break
+    except Exception:
+        pass
+    try:
+        beats = [float(l.split()[0]) for l in (d / "sheetsage2" / "beat.lab").read_text().splitlines() if l.strip()]
+        if len(beats) > 1:
+            measured = round(60 * (len(beats) - 1) / (beats[-1] - beats[0]), 1)
+    except Exception:
+        pass
+    return {"score": score, "measured": measured}
 
 
 def folders():
@@ -131,7 +151,7 @@ def jobs():
 
 
 PAGE = r"""<!doctype html><html lang="vi"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">
-<title>YuE2 Studio</title><style>
+<title>YuE2 Studio</title><link rel="icon" href="/favicon.ico"><style>
 :root{--bg:#f6f6f4;--fg:#1d1d1b;--card:#fff;--mute:#6b6b66;--acc:#3b5bdb;--bd:#ddd}
 @media (prefers-color-scheme:dark){:root{--bg:#161615;--fg:#eee;--card:#222220;--mute:#9a9a94;--acc:#748ffc;--bd:#3a3a37}}
 body{background:var(--bg);color:var(--fg);font:14px system-ui,sans-serif;margin:0}
@@ -151,7 +171,7 @@ button{margin-top:12px;padding:8px 16px;background:var(--acc);color:#fff;border:
 .help{font-size:12px;color:var(--mute);margin:3px 0 4px;line-height:1.4}code{font-size:12px}
 summary{margin-top:14px;cursor:pointer;font-weight:600}
 details pre,pre{white-space:pre-wrap;font-size:12px;color:var(--mute);margin:4px 0}
-</style></head><body><h1>YuE2 Studio</h1><main>
+</style></head><body><h1><img src="/favicon.ico" alt="" style="width:28px;height:28px;vertical-align:-6px;margin-right:8px">YuE2 Studio</h1><main>
 <section><h2>Tạo bài hát</h2>
 <p class="meta">Các trường có dấu <span class="req">*</span> là <b>bắt buộc</b>. Các tùy chọn khác có thể để mặc định.</p>
 <form id="f">
@@ -186,7 +206,7 @@ async function loadFolders(){const fs=await(await fetch('/api/folders')).json(),
  if(!fs.includes('webui'))fs.unshift('webui');sel.innerHTML=fs.map(o=>opt(o,cur)).join('')+'<option value="__new__">+ Tạo mới…</option>';sel.nextElementSibling.hidden=true}
 async function loadSongs(){loadFolders();const s=await(await fetch('/api/songs')).json();
  document.getElementById('songs').innerHTML=s.length?s.map(x=>`<div class="song"><b>${esc(x.name)}</b>
- <div class="meta">${x.time}${x.seed!=null?' · seed '+x.seed:''}</div><div class="meta">${esc(x.style)}</div>
+ <div class="meta">${x.time}${x.seed!=null?' · seed '+x.seed:''}${x.tempo.score?' · ♩ '+x.tempo.score+' BPM':''}${x.tempo.measured?' (đo: '+x.tempo.measured+')':''}</div><div class="meta">${esc(x.style)}</div>
  <audio controls preload="none" src="/files/${encodeURI(x.audio)}"></audio>
  <div class="midi">${x.midis.length?`🎼 Đã có ${x.midis.length} file MIDI <button type="button" class="sm" onclick="openDir('${esc(x.name)}/sheetsage2')">📂 Mở thư mục MIDI</button>`
   :midiRunning.has(x.name)?'<span class="meta">⏳ Đang tạo MIDI… (~1 phút)</span>'
@@ -220,6 +240,8 @@ class H(BaseHTTPRequestHandler):
         path = urlparse(self.path).path
         if path == "/":
             return self.send(PAGE.replace("__OPTS__", json.dumps(OPTIONS)), "text/html; charset=utf-8")
+        if path == "/favicon.ico":
+            return self.send((ROOT / "tools" / "assets" / "yue2-studio.ico").read_bytes(), "image/x-icon")
         if path == "/api/folders":
             return self.send(folders())
         if path == "/api/songs":
