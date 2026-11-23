@@ -29,6 +29,17 @@ def to_grid(notes, to_q):
     return out
 
 
+OURS = {"abc_melody.mid", "abc_chords.mid", "bass.mid", "other.mid"}
+
+
+def drop_sheetsage_midi(sd, names):
+    """Delete the .mid files SheetSage2 just wrote (names), never our own outputs."""
+    dropped = [sd / n for n in sorted(names) if n not in OURS and (sd / n).exists()]
+    for p in dropped:
+        p.unlink()
+    return dropped
+
+
 def _bpm(sd):
     try:
         return abc_tools.parse((sd / "score.abc").read_text(encoding="utf-8")).bpm
@@ -71,12 +82,16 @@ def render(song_dir, separate, transcribe):
     bpm = _bpm(sd)
     beat0, to_q = _grid(sd, bpm)
 
-    if not all((stems / f"{n}.wav").exists() for n in STEMS):
+    cut = stems / "beat0.json"  # beat-0 time the stems were cut at; a new events.json can move it
+    fresh = all((stems / f"{n}.wav").exists() for n in STEMS) and cut.exists() \
+        and abs(json.loads(cut.read_text())["beat0"] - beat0) < 1e-6
+    if not fresh:
         raw = stems / "raw"
         separate(_audio(song), raw)
         for n in STEMS:
             _trim(raw / f"{n}.wav", stems / f"{n}.wav", beat0)
         shutil.rmtree(raw)
+        cut.write_text(json.dumps({"beat0": beat0}))
 
     out = []
     for name, channel in (("bass", 3), ("other", 4)):

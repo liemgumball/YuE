@@ -119,8 +119,35 @@ class StemMidiTest(unittest.TestCase):
         with tempfile.TemporaryDirectory() as tmp:
             song = self._song(tmp)
             fake_separate(None, song / "sheetsage2" / "stems")
+            (song / "sheetsage2" / "stems" / "beat0.json").write_text('{"beat0": 0.5}')
             out, _ = self._render(song, boom)
             self.assertTrue(out[0].exists())
+
+    def test_reseparates_when_beat0_changed(self):
+        calls = []
+        def counting(audio, out_dir):
+            calls.append(1)
+            fake_separate(audio, out_dir)
+        with tempfile.TemporaryDirectory() as tmp:
+            song = self._song(tmp, beat0=0.25)
+            self._render(song, counting)
+            self._render(song, counting)  # same beat 0: reuse
+            ev = [{"subbeat": s, "values": {"timestamp": 0.5 + s / 4 * 0.5}} for s in range(0, 33, 4)]
+            (song / "sheetsage2" / "events.json").write_text(json.dumps({"events": ev}), encoding="utf-8")
+            self._render(song, counting)  # beat 0 moved: stems must be re-cut
+            self.assertEqual(len(calls), 2)
+            x, _ = sf.read(song / "sheetsage2" / "stems" / "drums.wav")
+            self.assertEqual(len(x), SR - SR // 2)
+
+    def test_drop_sheetsage_midi_keeps_ours(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            sd = Path(tmp)
+            for n in ("abc_melody", "abc_chords", "bass", "other", "melody", "chords", "transcription"):
+                (sd / f"{n}.mid").write_bytes(b"")
+            dropped = self.s.drop_sheetsage_midi(sd, {"melody.mid", "chords.mid", "transcription.mid", "bass.mid"})
+            self.assertEqual(sorted(p.name for p in dropped), ["chords.mid", "melody.mid", "transcription.mid"])
+            self.assertEqual(sorted(p.name for p in sd.glob("*.mid")),
+                             ["abc_chords.mid", "abc_melody.mid", "bass.mid", "other.mid"])
 
     def test_no_events_or_score_uses_120bpm(self):
         with tempfile.TemporaryDirectory() as tmp:
