@@ -1,7 +1,11 @@
+import io
+import json
 import sys
 import tempfile
 import unittest
+from contextlib import redirect_stdout
 from pathlib import Path
+from unittest.mock import patch
 
 try:
     import mido
@@ -38,18 +42,64 @@ class AbcMidiTest(unittest.TestCase):
         self.assertEqual(self.a.chord_pitches("A7sus4"), [45, 69, 62, 64, 67])
         self.assertIsNone(self.a.chord_pitches("Xyz"))
 
-    def _notes(self, path):
+    def _notes(self, path, with_velocity=False, track=None):
         m = mido.MidiFile(path)
         out = []
         for tr in m.tracks:
+            if track and not any(x.type == "track_name" and x.name == track for x in tr):
+                continue
             now, open_ = 0, {}
             for x in tr:
                 now += x.time
                 if x.type == "note_on" and x.velocity:
-                    open_[x.note] = now
+                    open_[x.note] = (now, x.velocity)
                 elif x.type in ("note_on", "note_off"):
-                    out.append((open_.pop(x.note), x.note, now))
+                    start, vel = open_.pop(x.note)
+                    out.append((start, x.note, now, vel) if with_velocity else (start, x.note, now))
         return m, sorted(out)
+
+    def _song(self, tmp, score, events=True):
+        sd = Path(tmp) / "sheetsage2"
+        sd.mkdir()
+        (sd / "score.abc").write_text(score, encoding="utf-8")
+        if events:
+            ev = [{"subbeat": s, "values": {"timestamp": s / 4 * 0.5}} for s in range(0, 33, 4)]
+            (sd / "events.json").write_text(json.dumps({"events": ev}), encoding="utf-8")
+            (Path(tmp) / "audio.flac").write_bytes(b"")
+
+    def test_render_velocity_from_audio(self):
+        import numpy as np
+        sr = 22050
+        x = np.concatenate([np.full(2 * sr, 0.05, np.float32), np.full(2 * sr, 0.5, np.float32)])
+        score = SCORE.replace("Z2|", "c4c4c4c4|c4c4c4c4|")
+        with tempfile.TemporaryDirectory() as tmp:
+            self._song(tmp, score)
+            with patch("midi_velocity.load_mono", return_value=x):
+                mel, ch = self.a.render(tmp)
+            _, ins = self._notes(mel, True, "Ins")
+            _, voc = self._notes(mel, True, "Vocal")
+            _, chords = self._notes(ch, True)
+        vel = [n[3] for n in ins]
+        self.assertEqual(len(vel), 8)
+        self.assertTrue(all(1 <= v <= 127 for v in vel))
+        self.assertLess(vel[0], vel[-1])
+        self.assertEqual({n[3] for n in voc}, {100})
+        first = {n[3] for n in chords if n[0] == 0}
+        second = {n[3] for n in chords if n[0] == 3840}
+        self.assertEqual(len(first), 1)
+        self.assertLess(max(first), min(second))
+
+    def test_render_without_events_uses_fixed(self):
+        out = io.StringIO()
+        with tempfile.TemporaryDirectory() as tmp:
+            self._song(tmp, SCORE, events=False)
+            with redirect_stdout(out):
+                mel, ch = self.a.render(tmp)
+            _, notes = self._notes(mel, True)
+            _, chords = self._notes(ch, True)
+        self.assertEqual({n[3] for n in notes}, {100})
+        self.assertEqual({n[3] for n in chords}, {70})
+        self.assertIn("warning:", out.getvalue())
 
     def test_render(self):
         with tempfile.TemporaryDirectory() as tmp:
