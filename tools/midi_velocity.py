@@ -13,8 +13,11 @@ def quarter_clock(events):
     subbeat is a 16th-note index from score quarter 0; timed events carry values["timestamp"].
     Outside the timed range, extend linearly with the first/last beat interval.
     """
-    pts = [(e["subbeat"] / 4, e["values"]["timestamp"]) for e in events if "timestamp" in e.get("values", {})]
-    q, t = np.array([p[0] for p in pts], float), np.array([p[1] for p in pts], float)
+    pts = dict(sorted((e["subbeat"] / 4, e["values"]["timestamp"])
+                      for e in events if "timestamp" in e.get("values", {})))
+    if len(pts) < 2:
+        raise ValueError("events.json has fewer than 2 distinct timestamps")
+    q, t = np.array(list(pts), float), np.array(list(pts.values()), float)
 
     def clock(quarter):
         if quarter < q[0]:
@@ -41,7 +44,10 @@ def span_db(samples, sr, t0, t1):
 
 
 def to_velocities(levels, lo, hi, smooth=3):
-    """Centred moving average, then map the 5th..95th percentile onto lo..hi, clamped to 1..127."""
+    """Centred moving average, then map the 5th..95th percentile onto lo..hi.
+
+    Outliers are clamped to lo//2..127 so silent spans stay audible instead of collapsing to 1.
+    """
     if not levels:
         return []
     x = np.asarray(levels, float)
@@ -51,4 +57,4 @@ def to_velocities(levels, lo, hi, smooth=3):
     if p95 - p5 < 1e-6:
         return [(lo + hi) // 2] * len(x)
     v = lo + (x - p5) * (hi - lo) / (p95 - p5)
-    return [int(np.clip(round(float(a)), 1, 127)) for a in v]
+    return [int(np.clip(round(float(a)), lo // 2, 127)) for a in v]

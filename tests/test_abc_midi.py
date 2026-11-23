@@ -141,6 +141,23 @@ class MidiVelocityTest(unittest.TestCase):
         self.assertEqual(min(out), 40)
         self.assertEqual(max(out), 120)
 
+    def test_quarter_clock_rejects_too_few_timestamps(self):
+        with self.assertRaises(ValueError):
+            self.v.quarter_clock([{"subbeat": 0, "values": {"timestamp": 1.0}}])
+        with self.assertRaises(ValueError):
+            self.v.quarter_clock([{"subbeat": 0, "values": {}}])
+
+    def test_quarter_clock_dedupes_and_sorts(self):
+        ev = [{"subbeat": 4, "values": {"timestamp": 1.5}}, {"subbeat": 0, "values": {"timestamp": 1.0}},
+              {"subbeat": 4, "values": {"timestamp": 1.5}}]
+        clock = self.v.quarter_clock(ev)
+        self.assertAlmostEqual(clock(2.0), 2.0)
+        self.assertAlmostEqual(clock(-1.0), 0.5)
+
+    def test_to_velocities_silent_outlier_floors_at_half_lo(self):
+        out = self.v.to_velocities([-20.0] * 30 + [-10.0] * 30 + [-180.0], 40, 120, smooth=1)
+        self.assertEqual(out[-1], 20)
+
     def test_to_velocities_flat_and_empty(self):
         self.assertEqual(self.v.to_velocities([-20.0] * 5, 40, 120), [80] * 5)
         self.assertEqual(self.v.to_velocities([-20.0], 40, 120), [80])
