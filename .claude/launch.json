@@ -1,0 +1,1 @@
+{"version":"0.0.1","configurations":[{"name":"webui","runtimeExecutable":".venv/Scripts/python.exe","runtimeArgs":["tools/webui.py"],"port":7860}]}
