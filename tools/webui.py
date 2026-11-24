@@ -4,6 +4,7 @@ Stdlib only. Run:  .venv\\Scripts\\python tools\\webui.py  then open http://127.
 """
 import json
 import os
+import re
 import mimetypes
 import subprocess
 import sys
@@ -16,6 +17,8 @@ from urllib.parse import parse_qs, unquote, urlparse
 
 ROOT = Path(__file__).resolve().parent.parent
 OUTPUTS = ROOT / "outputs"
+REFERENCES = OUTPUTS / "_references"
+AUDIO_EXTS = (".wav", ".flac", ".mp3", ".m4a", ".ogg", ".aac")
 JOBS = {}  # id -> {"proc", "log", "cmd", "started", "output"}
 
 # (flag, type, default, choices/help). type: text|number|int|choice|bool
@@ -83,7 +86,7 @@ def tempo(d):
 
 
 def folders():
-    return sorted(p.name for p in OUTPUTS.iterdir() if p.is_dir()) if OUTPUTS.exists() else []
+    return sorted(p.name for p in OUTPUTS.iterdir() if p.is_dir() and not p.name.startswith("_")) if OUTPUTS.exists() else []
 
 
 def start_job(form):
@@ -100,21 +103,127 @@ def start_job(form):
     outdir = OUTPUTS / (form.get("folder") or "webui").strip()
     outdir.mkdir(parents=True, exist_ok=True)
     exe = Path(sys.executable).with_name("yue2.exe" if sys.platform == "win32" else "yue2")
-    cmd = [str(exe) if exe.exists() else "yue2", "generate", "--output", str(outdir), "--id", sid,
-           "--style", form.get("style", ""), "--lyrics", form.get("lyrics", "")]
+    exe = str(exe) if exe.exists() else "yue2"
+    inst = bool(form.get("instrumental"))
+    ref = form.get("reference")
+    if ref:
+        ref = (OUTPUTS / ref).resolve()
+        if REFERENCES.resolve() not in ref.parents or not ref.is_file():
+            return {"error": "Không tìm thấy file bài hát tham khảo. Hãy tải lên lại."}
+        if inst:
+            return {"error": "Cover không lời chưa hỗ trợ trong giao diện. Bỏ chọn “Nhạc không lời” hoặc bỏ bài tham khảo."}
+        if any(j["proc"].poll() is None for j in JOBS.values()):
+            return {"error": "Đang có tác vụ khác chạy trên GPU. Vui lòng chờ xong rồi thử lại."}
+        sheetsage = ROOT / ".venv-sheetsage2" / "Scripts" / "python.exe"
+        if not sheetsage.exists():
+            return {"error": "Chưa cài .venv-sheetsage2 (cần để chép nhạc từ bài tham khảo)."}
+    opts = []
     for flag, kind, *_ in OPTIONS:
+        if inst and flag in ("--stage", "--abc-file", "--resume"):
+            continue
+        if ref and flag in ("--cot", "--abc-file", "--stage", "--resume"):
+            continue
         v = form.get(flag)
         if kind == "bool":
             if v:
-                cmd.append(flag)
+                opts.append(flag)
         elif v not in (None, ""):
-            cmd += [flag, str(v)]
+            opts += [flag, str(v)]
+    if ref:
+        mode = form.get("cover_mode") if form.get("cover_mode") in ("melody", "full", "transcribe") else "melody"
+        cmd = [sys.executable, "-u", str(ROOT / "tools/webui_cover.py"), str(sheetsage), exe, str(outdir), sid,
+               str(ref), mode, form.get("style", ""), form.get("lyrics", ""), *opts]
+    elif inst:
+        cmd = [sys.executable, "-u", str(ROOT / "tools/webui_instrumental.py"), exe, str(outdir), sid,
+               form.get("style", ""), *opts]
+    else:
+        cmd = [exe, "generate", "--output", str(outdir), "--id", sid,
+               "--style", form.get("style", ""), "--lyrics", form.get("lyrics", ""), *opts]
     log = outdir / f"{sid}.webui.log"
     fh = open(log, "w", encoding="utf-8")
     proc = subprocess.Popen(cmd, cwd=ROOT, stdout=fh, stderr=subprocess.STDOUT)
-    JOBS[jid] = {"proc": proc, "log": log, "cmd": cmd, "started": time.time(), "id": sid}
+    JOBS[jid] = {"proc": proc, "log": log, "cmd": cmd, "started": time.time(), "id": f"Cover: {sid}" if ref else sid}
     threading.Thread(target=lambda: (proc.wait(), fh.close()), daemon=True).start()
-    return jid
+    return {"job": jid}
+
+
+def save_reference(name, data):
+    """Store an uploaded reference recording under outputs/_references/ (prefixed, so never named audio.*)."""
+    REFERENCES.mkdir(parents=True, exist_ok=True)
+    stem = re.sub(r"[^\w.-]+", "_", Path(name).name).strip("._") or "reference"
+    if Path(stem).suffix.lower() not in AUDIO_EXTS:
+        return {"error": "Chỉ nhận file âm thanh: " + ", ".join(AUDIO_EXTS)}
+    f = REFERENCES / f"{uuid.uuid4().hex[:8]}_{stem}"
+    f.write_bytes(data)
+    return {"path": str(f.relative_to(OUTPUTS)).replace("\\", "/"), "name": Path(name).name,
+            "lyrics": embedded_lyrics(f)}
+
+
+def sung_lyrics(rel):
+    """Lyrics heard in the singing (tools/lyrics_asr.py: Demucs + Whisper). Blocks ~30 s; cached per file."""
+    ref = (OUTPUTS / rel).resolve()
+    if REFERENCES.resolve() not in ref.parents or not ref.is_file():
+        return {"error": "Không tìm thấy file bài hát tham khảo."}
+    cache = ref.with_name(ref.name + ".lyrics.json")
+    if not cache.exists():
+        if any(j["proc"].poll() is None for j in JOBS.values()):
+            return {"error": "GPU đang bận với tác vụ khác, chưa nghe lời được. Hãy nhập lời bằng tay hoặc tải lên lại sau."}
+        py = ROOT / ".venv-sheetsage2" / "Scripts" / "python.exe"
+        if not py.exists():
+            return {"error": "Chưa cài .venv-sheetsage2 (cần để nghe lời bài hát)."}
+        log = ref.with_name(ref.name + ".lyrics.log")
+        with open(log, "w", encoding="utf-8") as fh:
+            env = dict(os.environ, PYTHONUTF8="1", PYTHONIOENCODING="utf-8")
+            proc = subprocess.Popen([str(py), str(ROOT / "tools" / "lyrics_asr.py"), str(ref), str(cache)], cwd=ROOT,
+                                    stdout=fh, stderr=subprocess.STDOUT, env=env)
+            JOBS[uuid.uuid4().hex[:8]] = {"proc": proc, "log": log, "started": time.time(),
+                                          "id": f"Nghe lời: {ref.name.split('_', 1)[-1]}"}
+            try:
+                proc.wait(timeout=900)
+            except subprocess.TimeoutExpired:
+                proc.kill()
+        if proc.returncode or not cache.exists():
+            return {"error": "Không nghe được lời bài hát (xem log trong mục “Đang chạy”). Hãy nhập lời bằng tay."}
+    try:
+        return json.loads(cache.read_text(encoding="utf-8"))
+    except Exception:
+        return {"error": "Kết quả nghe lời bị hỏng. Hãy nhập lời bằng tay."}
+
+
+LRC_TIME = re.compile(r"\[\d+:\d+(?:[.:]\d+)?\]")
+LRC_META = re.compile(r"^\[(ar|ti|al|au|by|re|ve|length|offset|id|la):.*\]$", re.I)
+
+
+def embedded_lyrics(f):
+    """Lyrics stored in the file's tags (ID3 USLT, Vorbis LYRICS, MP4 ©lyr), shaped for YuE2; "" if none.
+
+    Never raises: a missing ffprobe, an unreadable file or untagged audio all mean "no lyrics".
+    """
+    try:
+        out = subprocess.run(["ffprobe", "-v", "error", "-show_entries", "format_tags:stream_tags", "-of", "json", str(f)],
+                             capture_output=True, timeout=30, encoding="utf-8", errors="replace").stdout
+        info = json.loads(out or "{}")
+        tags = [info.get("format", {}).get("tags", {})] + [s.get("tags", {}) for s in info.get("streams", [])]
+        text = next((v for t in tags for k, v in t.items()
+                     if k.lower().startswith(("lyrics", "unsyncedlyrics")) and str(v).strip()), "")
+    except Exception:
+        return ""
+    lines = []
+    for line in str(text).replace("\r\n", "\n").replace("\r", "\n").split("\n"):
+        line = line.strip()
+        if LRC_META.match(line):
+            continue
+        timed = bool(LRC_TIME.match(line))
+        line = LRC_TIME.sub("", line).strip()
+        if timed and not line:  # an empty timed line is an instrumental gap
+            continue
+        lines.append(line)
+    paragraphs = [p.strip("\n") for p in re.split(r"\n\s*\n", "\n".join(lines)) if p.strip()]
+    if not paragraphs:
+        return ""
+    if not any(re.match(r"^\[[^\]]+\]$", line) for p in paragraphs for line in p.split("\n")):
+        paragraphs = ["[Verse]\n" + p for p in paragraphs]  # YuE2 needs section tags; user relabels choruses
+    return "\n\n".join(paragraphs) + "\n"
 
 
 def start_midi(name):
@@ -170,6 +279,9 @@ button{margin-top:12px;padding:8px 16px;background:var(--acc);color:#fff;border:
 .req{color:#e03131;font-weight:600}label.big{font-size:14px;color:var(--fg);font-weight:600;margin-top:14px}
 .help{font-size:12px;color:var(--mute);margin:3px 0 4px;line-height:1.4}code{font-size:12px}
 summary{margin-top:14px;cursor:pointer;font-weight:600}
+.note{margin:6px 0;padding:8px 10px;border-radius:6px;border-left:4px solid;font-size:13px;line-height:1.4;color:var(--fg)}
+.note.ok{background:#ebfbee;border-color:#2f9e44}.note.warn{background:#fff3bf;border-color:#f08c00}.note.err{background:#ffe3e3;border-color:#e03131}
+@media (prefers-color-scheme:dark){.note.ok{background:#1f3326}.note.warn{background:#3d3214}.note.err{background:#3d1f1f}}
 details pre,pre{white-space:pre-wrap;font-size:12px;color:var(--mute);margin:4px 0}
 </style></head><body><h1><img src="/favicon.ico" alt="" style="width:28px;height:28px;vertical-align:-6px;margin-right:8px">YuE2 Studio</h1><main>
 <section><h2>Tạo bài hát</h2>
@@ -180,6 +292,16 @@ details pre,pre{white-space:pre-wrap;font-size:12px;color:var(--mute);margin:4px
 <textarea name="style" required placeholder="English, pop ballad, emotional male vocal, acoustic piano, 80 BPM"></textarea>
 <label class="chk big"><input type="checkbox" name="instrumental" id="inst">🎹 Nhạc không lời (instrumental)</label>
 <div class="help">Bỏ trống lời và tự thêm “Instrumental, no vocals” vào phong cách. Lưu ý: model vẫn có thể lẫn chút giọng hát — hãy nghe thử. Mô tả rõ nhạc cụ chính (vd. <i>solo piano</i>, <i>acoustic guitar</i>) để kết quả tốt hơn.</div>
+<details id="coverBox"><summary>🎤 Bài hát tham khảo (cover) — không bắt buộc</summary>
+<div class="help">Tải lên một bản thu. SheetSage2 chép <b>giai điệu</b> (và tùy chọn hợp âm) thành bản nhạc ABC, rồi YuE2 hát lại theo phong cách và lời bạn nhập. Giọng ca, âm sắc và cách phối của bài gốc <b>không</b> được giữ — hãy mô tả chúng trong “Phong cách”.</div>
+<input type="file" id="refFile" accept="audio/*,.wav,.flac,.mp3,.m4a,.ogg,.aac"><input type="hidden" name="reference" id="refPath">
+<div id="refStatus" class="help"></div>
+<label>Chế độ cover</label><select name="cover_mode" id="coverMode">
+<option value="melody">Chỉ giữ giai điệu (khuyên dùng — phần đệm tự phối theo phong cách mới)</option>
+<option value="full">Giữ giai điệu + hợp âm gốc (sát bài gốc hơn)</option>
+<option value="transcribe">Chỉ chép nhạc ABC (xem/sửa trước, chưa tạo bài)</option></select>
+<div class="help">Lời nên khớp số âm tiết và thứ tự đoạn với giai điệu gốc. Bản nhạc chép được lưu ở <code>&lt;thư mục&gt;/&lt;tên bài&gt;_reference/score.abc</code>; có thể sửa rồi dùng lại qua tùy chọn <code>--abc-file</code>.</div>
+<button type="button" class="sm" id="refClear" hidden>✕ Bỏ bài tham khảo</button></details>
 <div id="lyricsBox"><label class="big">Lời bài hát <span class="req">* bắt buộc</span></label>
 <div class="help">Chia đoạn bằng thẻ trong ngoặc vuông: <code>[Verse]</code>, <code>[Chorus]</code>, <code>[Bridge]</code>, <code>[Outro]</code>. Mỗi câu một dòng, các đoạn cách nhau một dòng trống. Lời càng dài thì bài càng dài và tạo càng lâu.</div>
 <textarea name="lyrics" required style="min-height:180px" placeholder="[Verse]&#10;Câu hát thứ nhất&#10;Câu hát thứ hai&#10;&#10;[Chorus]&#10;Điệp khúc..."></textarea></div>
@@ -199,20 +321,48 @@ document.getElementById('opts').innerHTML=OPTS.map(([f,k,d,h,t])=>{
  return `<div><label>${f}</label><input name="${f}" value="${esc(d)}" ${k!='text'?'type=number step=any':''}><div class="help">${esc(h)}</div></div>`}).join('');
 document.getElementById('f').onsubmit=async e=>{e.preventDefault();const fd=new FormData(e.target),o={};
  for(const[k,v]of fd)o[k]=v==='on'?true:v;
- await fetch('/api/generate',{method:'POST',body:JSON.stringify(o)});loadJobs()};
-document.addEventListener('change',e=>{if(e.target.id=='inst'){const on=e.target.checked,t=document.querySelector('[name=lyrics]');document.getElementById('lyricsBox').hidden=on;t.required=!on}
+ if(refUploading)return alert('Đang tải lên / nghe lời bài tham khảo, vui lòng chờ xong.');
+ const r=await(await fetch('/api/generate',{method:'POST',body:JSON.stringify(o)})).json();if(r.error)alert(r.error);loadJobs()};
+let refUploading=false;const refPath=document.getElementById('refPath'),refStatus=document.getElementById('refStatus'),refClear=document.getElementById('refClear');
+function syncLyrics(){const t=document.querySelector('[name=lyrics]'),inst=document.getElementById('inst').checked,
+ onlyAbc=!!refPath.value&&document.getElementById('coverMode').value=='transcribe';
+ document.getElementById('lyricsBox').hidden=inst||onlyAbc;t.required=!(inst||onlyAbc)}
+refClear.onclick=()=>{refPath.value='';document.getElementById('refFile').value='';setRef('');refClear.hidden=true;syncLyrics()};
+document.getElementById('refFile').onchange=async e=>{const f=e.target.files[0];refPath.value='';refClear.hidden=true;if(!f)return syncLyrics();
+ refUploading=true;setRef('⏳ Đang tải lên '+f.name+'…');
+ try{const r=await(await fetch('/api/upload',{method:'POST',headers:{'X-Filename':encodeURIComponent(f.name)},body:f})).json();
+  if(r.error){setRef('❌ '+r.error,'err');e.target.value=''}else{refPath.value=r.path;refClear.hidden=false;
+   const t=document.querySelector('[name=lyrics]'),up='Đã tải lên: '+r.name+'. ';
+   if(!r.lyrics&&t.value.trim())setRef('✅ '+up+'Giữ lời bạn đang nhập.','ok');
+   else if(!r.lyrics){setRef('⏳ '+up+'Đang nghe lời từ giọng hát (tách giọng + Whisper, khoảng 30 giây – 2 phút)…','warn');
+    let s;try{s=await(await fetch('/api/lyrics',{method:'POST',body:JSON.stringify({path:r.path})})).json()}catch(err){s={error:'Mất kết nối: '+err}}
+    if(refPath.value!=r.path)return;  // another file was picked meanwhile
+    if(s.error)setRef('⚠️ '+up+s.error,'warn');
+    else if(!s.lyrics)setRef('⚠️ '+up+'Không nghe thấy lời hát (có thể là nhạc không lời) — hãy tự nhập lời vào ô “Lời bài hát”.','warn');
+    else if(t.value.trim()&&!confirm('Đã nghe được lời bài hát. Thay lời bạn vừa nhập bằng lời nghe được?'))setRef('✅ '+up+'Đã nghe được lời nhưng bạn giữ lời đang nhập.','ok');
+    else{t.value=s.lyrics;setRef('🎧 '+up+'Đã nghe và điền '+s.lines+' câu hát vào ô “Lời bài hát”.'
+     +(s.missed?' Có '+s.missed+' đoạn hát không nghe được — lời của đoạn đó bị thiếu, hãy tự bổ sung.':'')
+     +' Máy nghe có thể sai chữ, sai dấu và đoán sai nhãn đoạn — hãy đọc soát lại trước khi tạo bài.','warn')}}
+   else if(!t.value.trim()||confirm('File có sẵn lời bài hát. Thay lời đang nhập bằng lời trong file?')){t.value=r.lyrics;setRef('✅ '+up+'Đã chép lời từ file vào ô “Lời bài hát”. Hãy kiểm tra lại nhãn đoạn ([Verse], [Chorus]…).','ok')}
+   else setRef('✅ '+up+'File có lời nhưng bạn giữ lời đang nhập.','ok')}}
+ catch(err){setRef('❌ Tải lên thất bại: '+err,'err')}finally{refUploading=false;syncLyrics()}};
+function setRef(msg,kind){refStatus.textContent=msg;refStatus.className=kind?'note '+kind:'help'}
+document.addEventListener('change',e=>{if(e.target.id=='inst'||e.target.id=='coverMode')syncLyrics()
  if(e.target.matches('select[data-combo]')){const i=e.target.nextElementSibling;i.hidden=e.target.value!='__new__';i.required=!i.hidden;if(!i.hidden)i.focus()}});
 async function loadFolders(){const fs=await(await fetch('/api/folders')).json(),sel=document.getElementById('folder'),cur=sel.value&&sel.value!='__new__'?sel.value:'webui';
  if(!fs.includes('webui'))fs.unshift('webui');sel.innerHTML=fs.map(o=>opt(o,cur)).join('')+'<option value="__new__">+ Tạo mới…</option>';sel.nextElementSibling.hidden=true}
 async function loadSongs(){loadFolders();const s=await(await fetch('/api/songs')).json();
- document.getElementById('songs').innerHTML=s.length?s.map(x=>`<div class="song"><b>${esc(x.name)}</b>
+ document.getElementById('songs').innerHTML=s.length?s.map(x=>`<div class="song"><b>${esc(x.name)}</b> <button type="button" class="sm" onclick="openDir('${esc(x.name)}')">📂 Mở thư mục bài hát</button>
  <div class="meta">${x.time}${x.seed!=null?' · seed '+x.seed:''}${x.tempo.score?' · ♩ '+x.tempo.score+' BPM':''}${x.tempo.measured?' (đo: '+x.tempo.measured+')':''}</div><div class="meta">${esc(x.style)}</div>
  <audio controls preload="none" src="/files/${encodeURI(x.audio)}"></audio>
+ <span class="sm" draggable="true" style="cursor:grab" title="Kéo file audio ra Explorer/desktop" ondragstart="dragAudio(event,'${esc(x.audio)}')">⠿ Kéo audio</span>
  <div class="midi">${x.midis.length?`🎼 Đã có ${x.midis.length} file MIDI <button type="button" class="sm" onclick="openDir('${esc(x.name)}/sheetsage2')">📂 Mở thư mục MIDI</button>`
   :midiRunning.has(x.name)?'<span class="meta">⏳ Đang tạo MIDI… (~1 phút)</span>'
   :`<button type="button" class="sm" onclick="makeMidi('${esc(x.name)}')">🎼 Tạo MIDI</button> <span class="help">Chuyển audio thành MIDI (giai điệu, hợp âm, bass, nhạc cụ khác) và tách stem audio (trống, bass, khác, vocal).</span>`}</div>
  <details><summary class="meta">lời bài hát</summary><pre>${esc(x.lyrics)}</pre></details></div>`).join(''):'<p class="meta">Chưa có bài hát nào.</p>'}
 let midiRunning=new Set();
+function dragAudio(e,a){const u=location.origin+'/files/'+encodeURI(a),n=a.split('/').pop();
+ e.dataTransfer.setData('DownloadURL',`audio/flac:${n}:${u}`);e.dataTransfer.setData('text/uri-list',u)}
 async function openDir(p){const r=await(await fetch('/api/open',{method:'POST',body:JSON.stringify({path:p})})).json();if(r.error)alert(r.error)}
 async function makeMidi(n){const r=await(await fetch('/api/midi',{method:'POST',body:JSON.stringify({song:n})})).json();
  if(r.error)return alert(r.error);await loadJobs();loadSongs()}
@@ -251,7 +401,24 @@ class H(BaseHTTPRequestHandler):
         if path.startswith("/files/"):
             f = (OUTPUTS / unquote(path[7:])).resolve()
             if OUTPUTS.resolve() in f.parents and f.is_file():
-                return self.send(f.read_bytes(), mimetypes.guess_type(f.name)[0] or "audio/flac")
+                data, ctype = f.read_bytes(), mimetypes.guess_type(f.name)[0] or "audio/flac"
+                m = re.match(r"bytes=(\d*)-(\d*)", self.headers.get("Range", ""))
+                if not m or not (m[1] or m[2]):
+                    return self.send(data, ctype)
+                n = len(data)
+                start, end = (int(m[1]), int(m[2] or n - 1)) if m[1] else (max(0, n - int(m[2])), n - 1)
+                end = min(end, n - 1)
+                if start > end:
+                    self.send_response(416)
+                    self.send_header("Content-Range", f"bytes */{n}")
+                    return self.end_headers()
+                self.send_response(206)
+                self.send_header("Content-Type", ctype)
+                self.send_header("Accept-Ranges", "bytes")
+                self.send_header("Content-Range", f"bytes {start}-{end}/{n}")
+                self.send_header("Content-Length", str(end - start + 1))
+                self.end_headers()
+                return self.wfile.write(data[start:end + 1])
         self.send({"error": "not found"}, code=404)
 
     def do_POST(self):
@@ -267,7 +434,15 @@ class H(BaseHTTPRequestHandler):
             return self.send(start_midi(form.get("song", "")))
         if self.path == "/api/generate":
             form = json.loads(self.rfile.read(int(self.headers["Content-Length"])))
-            return self.send({"job": start_job(form)})
+            return self.send(start_job(form))
+        if self.path == "/api/lyrics":
+            form = json.loads(self.rfile.read(int(self.headers["Content-Length"])))
+            return self.send(sung_lyrics(form.get("path", "")))
+        if self.path == "/api/upload":
+            n = int(self.headers["Content-Length"])
+            if n > 200 * 2**20:
+                return self.send({"error": "File quá lớn (tối đa 200 MB)."})
+            return self.send(save_reference(unquote(self.headers.get("X-Filename", "")), self.rfile.read(n)))
         self.send({"error": "not found"}, code=404)
 
     def log_message(self, *a):
